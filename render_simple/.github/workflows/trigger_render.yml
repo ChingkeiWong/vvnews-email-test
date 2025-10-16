@@ -1,0 +1,131 @@
+name: VVNews定时触发 - 王敏奕新闻监控
+
+on:
+  schedule:
+    # 每10分钟运行一次 (北京时间每小时的 0, 10, 20, 30, 40, 50 分)
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  trigger-render:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 🚀 触发Render服务
+      run: |
+        echo "🚀 开始触发Render服务..."
+        echo "⏰ 运行时间: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+        echo "🎯 目标仓库: ChingkeiWong/vvnews_render"
+        
+        # 设置Render服务URL
+        RENDER_URL="${{ secrets.RENDER_SERVICE_URL }}"
+        
+        if [ -z "$RENDER_URL" ]; then
+          echo "❌ 错误: 请在GitHub Secrets中设置RENDER_SERVICE_URL"
+          echo "💡 示例: https://vvnews-auto-service.onrender.com"
+          exit 1
+        fi
+        
+        echo "🎯 目标服务: $RENDER_URL"
+        
+        # 检查服务健康状态
+        echo "📊 检查服务健康状态..."
+        HEALTH_CODE=$(curl -s -w "%{http_code}" -o health.json "$RENDER_URL/health" --max-time 30 || echo "000")
+        
+        if [ "$HEALTH_CODE" = "200" ]; then
+          echo "✅ 服务健康检查通过"
+          echo "📋 健康状态:"
+          cat health.json | jq '.' 2>/dev/null || cat health.json
+        else
+          echo "⚠️ 健康检查异常，状态码: $HEALTH_CODE"
+          echo "📋 响应内容:"
+          cat health.json 2>/dev/null || echo "无响应内容"
+        fi
+        
+        # 触发新闻检查
+        echo ""
+        echo "📰 触发新闻检查..."
+        RUN_CODE=$(curl -s -w "%{http_code}" -o run.json "$RENDER_URL/run" --max-time 120 || echo "000")
+        
+        if [ "$RUN_CODE" = "200" ]; then
+          echo "✅ 新闻检查触发成功"
+          echo "📋 执行结果:"
+          cat run.json | jq '.' 2>/dev/null || cat run.json
+          
+          # 检查是否有新新闻
+          if grep -q "success" run.json && grep -q "新新闻" run.json; then
+            echo "🎉 发现新新闻！已发送邮件通知"
+          elif grep -q "没有发现新新闻" run.json; then
+            echo "ℹ️ 没有发现新新闻"
+          fi
+        else
+          echo "❌ 新闻检查触发失败，状态码: $RUN_CODE"
+          echo "📋 错误信息:"
+          cat run.json 2>/dev/null || echo "无响应内容"
+        fi
+        
+        echo ""
+        echo "🎉 触发完成！"
+        
+    - name: 📤 上传响应日志
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: render-responses-${{ github.run_number }}
+        path: |
+          health.json
+          run.json
+        retention-days: 3
+
+  # 备用任务：如果Render服务失败，在GitHub Actions中直接运行
+  backup-run:
+    runs-on: ubuntu-latest
+    needs: trigger-render
+    if: failure()
+    
+    steps:
+    - name: 📥 检出代码
+      uses: actions/checkout@v4
+      
+    - name: 🐍 设置Python环境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: 📦 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4 lxml
+        
+    - name: 🚨 备用运行 - VVNews Auto Bot
+      env:
+        GMAIL_EMAIL: ${{ secrets.GMAIL_EMAIL }}
+        GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+      run: |
+        echo "🚨 Render服务不可用，启动备用本地运行模式"
+        echo "⏰ 运行时间: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+        echo "📧 邮箱配置: $GMAIL_EMAIL"
+        
+        # 确保文件存在
+        if [ ! -f "vvnews_bot_auto.py" ]; then
+          echo "❌ 错误: vvnews_bot_auto.py 文件不存在"
+          exit 1
+        fi
+        
+        # 运行新闻检查
+        python vvnews_bot_auto.py
+        
+    - name: 📤 保存备用运行结果
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: backup-results-${{ github.run_number }}
+        path: results/
+        retention-days: 7
+        
+    - name: 📊 备用运行总结
+      if: always()
+      run: |
+        echo "📊 备用运行完成"
+        echo "⏰ 完成时间: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+        echo "💡 建议检查Render服务状态并修复问题"

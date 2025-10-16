@@ -1,0 +1,17 @@
+# VVNews 邮件测试服务依赖包
+# 基础依赖
+requests>=2.25.1
+beautifulsoup4>=4.9.3
+lxml>=4.6.3
+feedparser>=6.0.10
+
+# 邮件发送依赖 (Python内置，无需额外安装)
+# smtplib - Python标准库
+# email - Python标准库
+# http.server - Python标准库
+
+# 日志和系统依赖 (Python内置)
+# logging - Python标准库
+# os - Python标准库
+# json - Python标准库
+# datetime - Python标准库
