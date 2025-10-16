@@ -48,6 +48,9 @@ class EmailTestHandler(BaseHTTPRequestHandler):
             gmail_email = os.getenv('GMAIL_EMAIL')
             gmail_password = os.getenv('GMAIL_PASSWORD')
             
+            # 测试网络连接
+            network_test = self.test_network_connectivity()
+            
             data = {
                 "service": "VVNews Email Test",
                 "beijing_time": datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S'),
@@ -57,6 +60,7 @@ class EmailTestHandler(BaseHTTPRequestHandler):
                     "python_version": os.sys.version.split()[0],
                     "port": os.getenv('PORT', '10000')
                 },
+                "network": network_test,
                 "config_status": "✅ 已配置" if (gmail_email and gmail_password) else "❌ 缺少配置"
             }
             self.wfile.write(json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
@@ -153,12 +157,52 @@ VVNews 王敏奕新闻机器人 - 邮件测试模块
             
             msg.attach(MIMEText(body, 'plain', 'utf-8'))
             
-            # 发送邮件
+            # 发送邮件 - 使用更健壮的连接方式
             logging.info("📧 正在连接Gmail SMTP服务器...")
-            server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-            server.quit()
+            
+            # 尝试多种连接方式
+            connection_success = False
+            
+            # 方式1: SMTP_SSL (推荐)
+            try:
+                logging.info("尝试SMTP_SSL连接...")
+                server = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30)
+                server.login(sender_email, sender_password)
+                server.send_message(msg)
+                server.quit()
+                connection_success = True
+                logging.info("SMTP_SSL连接成功")
+            except Exception as e1:
+                logging.warning(f"SMTP_SSL连接失败: {e1}")
+                
+                # 方式2: SMTP with STARTTLS
+                try:
+                    logging.info("尝试SMTP STARTTLS连接...")
+                    server = smtplib.SMTP('smtp.gmail.com', 587, timeout=30)
+                    server.starttls()
+                    server.login(sender_email, sender_password)
+                    server.send_message(msg)
+                    server.quit()
+                    connection_success = True
+                    logging.info("SMTP STARTTLS连接成功")
+                except Exception as e2:
+                    logging.error(f"SMTP STARTTLS连接也失败: {e2}")
+                    
+                    # 方式3: 使用代理或备用端口
+                    try:
+                        logging.info("尝试备用端口连接...")
+                        server = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=60)
+                        server.set_debuglevel(1)  # 启用调试
+                        server.login(sender_email, sender_password)
+                        server.send_message(msg)
+                        server.quit()
+                        connection_success = True
+                        logging.info("备用连接成功")
+                    except Exception as e3:
+                        logging.error(f"所有连接方式都失败: {e3}")
+            
+            if not connection_success:
+                raise Exception("所有SMTP连接方式都失败")
             
             logging.info("✅ 测试邮件发送成功！")
             return True
@@ -166,6 +210,41 @@ VVNews 王敏奕新闻机器人 - 邮件测试模块
         except Exception as e:
             logging.error(f"❌ 邮件发送失败: {str(e)}")
             return False
+    
+    def test_network_connectivity(self):
+        """测试网络连接"""
+        import socket
+        
+        test_results = {}
+        
+        # 测试Gmail SMTP服务器连接
+        try:
+            socket.setdefaulttimeout(10)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            result = sock.connect_ex(('smtp.gmail.com', 465))
+            sock.close()
+            test_results['gmail_smtp_465'] = "✅ 可连接" if result == 0 else f"❌ 连接失败 (错误码: {result})"
+        except Exception as e:
+            test_results['gmail_smtp_465'] = f"❌ 连接异常: {str(e)}"
+        
+        # 测试Gmail SMTP端口587
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            result = sock.connect_ex(('smtp.gmail.com', 587))
+            sock.close()
+            test_results['gmail_smtp_587'] = "✅ 可连接" if result == 0 else f"❌ 连接失败 (错误码: {result})"
+        except Exception as e:
+            test_results['gmail_smtp_587'] = f"❌ 连接异常: {str(e)}"
+        
+        # 测试DNS解析
+        try:
+            import socket
+            socket.gethostbyname('smtp.gmail.com')
+            test_results['dns_resolution'] = "✅ DNS解析正常"
+        except Exception as e:
+            test_results['dns_resolution'] = f"❌ DNS解析失败: {str(e)}"
+        
+        return test_results
     
     def log_message(self, format, *args):
         logging.info(f"HTTP {format % args}")
