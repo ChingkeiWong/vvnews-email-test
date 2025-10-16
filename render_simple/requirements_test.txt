@@ -5,6 +5,9 @@ beautifulsoup4>=4.9.3
 lxml>=4.6.3
 feedparser>=6.0.10
 
+# SendGrid邮件服务支持 (通过requests)
+# 无需额外依赖，使用requests库调用SendGrid API
+
 # 邮件发送依赖 (Python内置，无需额外安装)
 # smtplib - Python标准库
 # email - Python标准库
