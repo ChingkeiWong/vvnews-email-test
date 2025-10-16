@@ -47,6 +47,8 @@ class EmailTestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             
             sendgrid_api_key = os.getenv('SENDGRID_API_KEY')
+            sender_email = os.getenv('SENDER_EMAIL')
+            recipient_emails = os.getenv('RECIPIENT_EMAILS')
             gmail_email = os.getenv('GMAIL_EMAIL')
             gmail_password = os.getenv('GMAIL_PASSWORD')
             recipient_email = os.getenv('RECIPIENT_EMAIL', 'chingkeiwong666@gmail.com')
@@ -55,22 +57,30 @@ class EmailTestHandler(BaseHTTPRequestHandler):
             network_test = self.test_network_connectivity()
             
             # 检查邮件服务配置
-            email_configured = bool(sendgrid_api_key) or (bool(gmail_email) and bool(gmail_password))
+            sendgrid_configured = bool(sendgrid_api_key) and bool(sender_email) and bool(recipient_emails)
+            gmail_configured = bool(gmail_email) and bool(gmail_password)
+            email_configured = sendgrid_configured or gmail_configured
             
             data = {
                 "service": "VVNews Email Test",
                 "beijing_time": datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S'),
                 "environment": {
                     "sendgrid_api_key_configured": bool(sendgrid_api_key),
+                    "sender_email_configured": bool(sender_email),
+                    "recipient_emails_configured": bool(recipient_emails),
                     "gmail_email_configured": bool(gmail_email),
                     "gmail_password_configured": bool(gmail_password),
-                    "recipient_email": recipient_email,
                     "python_version": os.sys.version.split()[0],
                     "port": os.getenv('PORT', '10000')
                 },
                 "network": network_test,
                 "config_status": "✅ 已配置" if email_configured else "❌ 缺少配置",
-                "preferred_service": "SendGrid" if sendgrid_api_key else "Gmail SMTP" if (gmail_email and gmail_password) else "None"
+                "preferred_service": "SendGrid" if sendgrid_configured else "Gmail SMTP" if gmail_configured else "None",
+                "sendgrid_config": {
+                    "api_key": "✅ 已设置" if sendgrid_api_key else "❌ 未设置",
+                    "sender": sender_email if sender_email else "❌ 未设置",
+                    "recipients": recipient_emails if recipient_emails else "❌ 未设置"
+                }
             }
             self.wfile.write(json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
             
@@ -85,15 +95,21 @@ class EmailTestHandler(BaseHTTPRequestHandler):
                 
                 # 检查环境变量 - 支持SendGrid和Gmail两种方式
                 sendgrid_api_key = os.getenv('SENDGRID_API_KEY')
+                sender_email = os.getenv('SENDER_EMAIL')
+                recipient_emails = os.getenv('RECIPIENT_EMAILS')
                 gmail_email = os.getenv('GMAIL_EMAIL')
                 gmail_password = os.getenv('GMAIL_PASSWORD')
                 recipient_email = os.getenv('RECIPIENT_EMAIL', 'chingkeiwong666@gmail.com')
                 
+                # 检查SendGrid配置是否完整
+                sendgrid_configured = bool(sendgrid_api_key) and bool(sender_email) and bool(recipient_emails)
+                gmail_configured = bool(gmail_email) and bool(gmail_password)
+                
                 # 优先使用SendGrid
-                if sendgrid_api_key:
-                    success = self.send_test_email_sendgrid(sendgrid_api_key, recipient_email)
+                if sendgrid_configured:
+                    success = self.send_test_email_sendgrid(sendgrid_api_key, recipient_emails.split(',')[0].strip())
                     email_service = "SendGrid"
-                elif gmail_email and gmail_password:
+                elif gmail_configured:
                     success = self.send_test_email_gmail(gmail_email, gmail_password, recipient_email)
                     email_service = "Gmail SMTP"
                 else:
@@ -103,13 +119,18 @@ class EmailTestHandler(BaseHTTPRequestHandler):
                 if not success:
                     result = {
                         "status": "error",
-                        "message": "❌ 缺少邮件配置 - 请设置SENDGRID_API_KEY或GMAIL_EMAIL/GMAIL_PASSWORD环境变量",
+                        "message": "❌ 缺少邮件配置 - 请设置完整的SendGrid或Gmail环境变量",
                         "timestamp": beijing_time.strftime('%Y-%m-%d %H:%M:%S'),
                         "config": {
                             "sendgrid_api_key": "✅ 已设置" if sendgrid_api_key else "❌ 未设置",
+                            "sender_email": "✅ 已设置" if sender_email else "❌ 未设置",
+                            "recipient_emails": "✅ 已设置" if recipient_emails else "❌ 未设置",
                             "gmail_email": "❌ 未设置" if not gmail_email else f"✅ {gmail_email[:3]}***@{gmail_email.split('@')[1]}",
-                            "gmail_password": "❌ 未设置" if not gmail_password else "✅ 已设置",
-                            "recipient_email": recipient_email
+                            "gmail_password": "❌ 未设置" if not gmail_password else "✅ 已设置"
+                        },
+                        "required_vars": {
+                            "sendgrid": ["SENDGRID_API_KEY", "SENDER_EMAIL", "RECIPIENT_EMAILS"],
+                            "gmail": ["GMAIL_EMAIL", "GMAIL_PASSWORD"]
                         }
                     }
                 else:
@@ -141,19 +162,8 @@ class EmailTestHandler(BaseHTTPRequestHandler):
         try:
             beijing_time = datetime.now(timezone(timedelta(hours=8)))
             
-            # 构建邮件内容
-            email_data = {
-                "personalizations": [
-                    {
-                        "to": [{"email": recipient_email}]
-                    }
-                ],
-                "from": {"email": "noreply@vvnews.com", "name": "VVNews测试服务"},
-                "subject": "[VVNews测试] Render邮件发送测试成功",
-                "content": [
-                    {
-                        "type": "text/plain",
-                        "value": f"""
+            subject = "[VVNews测试] Render邮件发送测试成功"
+            content = f"""
 🎉 VVNews Render邮件测试成功！
 
 📧 测试信息:
@@ -174,27 +184,56 @@ class EmailTestHandler(BaseHTTPRequestHandler):
 VVNews 王敏奕新闻机器人 - 邮件测试模块
 测试时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}
 """
-                    }
-                ]
-            }
             
-            # 发送邮件
-            logging.info("📧 正在通过SendGrid API发送邮件...")
-            response = requests.post(
+            return self.send_email_via_sendgrid(subject, content, api_key, recipient_email)
+                
+        except Exception as e:
+            logging.error(f"❌ SendGrid邮件发送异常: {str(e)}")
+            return False
+    
+    def send_email_via_sendgrid(self, subject, content, api_key=None, recipient_email=None):
+        """通用的SendGrid邮件发送函数"""
+        try:
+            # 获取环境变量
+            if not api_key:
+                api_key = os.getenv("SENDGRID_API_KEY")
+            sender = os.getenv("SENDER_EMAIL", "noreply@vvnews.com")
+            
+            if not recipient_email:
+                recipients = os.getenv("RECIPIENT_EMAILS", "chingkeiwong666@gmail.com")
+            else:
+                recipients = recipient_email
+
+            if not all([api_key, sender, recipients]):
+                logging.error("❌ 缺少环境变量 SENDGRID_API_KEY / SENDER_EMAIL / RECIPIENT_EMAILS")
+                return False
+
+            # 处理多个收件人
+            if "," in recipients:
+                to_list = [{"email": email.strip()} for email in recipients.split(",")]
+            else:
+                to_list = [{"email": recipients.strip()}]
+
+            data = {
+                "personalizations": [{"to": to_list}],
+                "from": {"email": sender, "name": "VVNews Bot"},
+                "subject": subject,
+                "content": [{"type": "text/plain", "value": content}],
+            }
+
+            logging.info("📧 正在通过 SendGrid API 发送邮件...")
+            resp = requests.post(
                 "https://api.sendgrid.com/v3/mail/send",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json=email_data,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=data,
                 timeout=30
             )
-            
-            if response.status_code == 202:
-                logging.info("✅ SendGrid邮件发送成功！")
+
+            if resp.status_code == 202:
+                logging.info("✅ 邮件已成功发送！")
                 return True
             else:
-                logging.error(f"❌ SendGrid邮件发送失败: {response.status_code} - {response.text}")
+                logging.error(f"❌ 邮件发送失败: {resp.status_code}, {resp.text}")
                 return False
                 
         except Exception as e:
