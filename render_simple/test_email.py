@@ -19,6 +19,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 class EmailTestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        self.handle_request()
+    
+    def do_HEAD(self):
+        """支持HEAD方法，避免501错误"""
+        self.handle_request()
+    
+    def handle_request(self):
         if self.path == '/':
             self.send_response(200)
             self.send_header('Content-type', 'text/html; charset=utf-8')
