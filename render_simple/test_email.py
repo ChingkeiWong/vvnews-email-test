@@ -59,6 +59,8 @@ class EmailTestHandler(BaseHTTPRequestHandler):
             gmail_email = os.getenv('GMAIL_EMAIL')
             gmail_password = os.getenv('GMAIL_PASSWORD')
             recipient_email = os.getenv('RECIPIENT_EMAIL', 'chingkeiwong666@gmail.com')
+            zoho_email = os.getenv('ZOHO_EMAIL')
+            zoho_app_pass = os.getenv('ZOHO_APP_PASS')
             
             # 测试网络连接
             network_test = self.test_network_connectivity()
@@ -66,7 +68,8 @@ class EmailTestHandler(BaseHTTPRequestHandler):
             # 检查邮件服务配置
             sendgrid_configured = bool(sendgrid_api_key) and bool(sender_email) and bool(recipient_emails)
             gmail_configured = bool(gmail_email) and bool(gmail_password)
-            email_configured = sendgrid_configured or gmail_configured
+            zoho_configured = bool(zoho_email) and bool(zoho_app_pass) and bool(recipient_emails)
+            email_configured = sendgrid_configured or gmail_configured or zoho_configured
             
             data = {
                 "service": "VVNews Email Test",
@@ -82,10 +85,15 @@ class EmailTestHandler(BaseHTTPRequestHandler):
                 },
                 "network": network_test,
                 "config_status": "✅ 已配置" if email_configured else "❌ 缺少配置",
-                "preferred_service": "SendGrid" if sendgrid_configured else "Gmail SMTP" if gmail_configured else "None",
+                "preferred_service": "Zoho" if zoho_configured else ("SendGrid" if sendgrid_configured else ("Gmail SMTP" if gmail_configured else "None")),
                 "sendgrid_config": {
                     "api_key": "✅ 已设置" if sendgrid_api_key else "❌ 未设置",
                     "sender": sender_email if sender_email else "❌ 未设置",
+                    "recipients": recipient_emails if recipient_emails else "❌ 未设置"
+                },
+                "zoho_config": {
+                    "email": zoho_email if zoho_email else "❌ 未设置",
+                    "app_pass": "✅ 已设置" if zoho_app_pass else "❌ 未设置",
                     "recipients": recipient_emails if recipient_emails else "❌ 未设置"
                 }
             }
@@ -100,20 +108,26 @@ class EmailTestHandler(BaseHTTPRequestHandler):
                 beijing_time = datetime.now(timezone(timedelta(hours=8)))
                 logging.info(f"🧪 开始邮件发送测试 - 北京时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 
-                # 检查环境变量 - 支持SendGrid和Gmail两种方式
+                # 检查环境变量 - 支持 Zoho/SendGrid/Gmail 三种方式
                 sendgrid_api_key = os.getenv('SENDGRID_API_KEY')
                 sender_email = os.getenv('SENDER_EMAIL')
                 recipient_emails = os.getenv('RECIPIENT_EMAILS')
                 gmail_email = os.getenv('GMAIL_EMAIL')
                 gmail_password = os.getenv('GMAIL_PASSWORD')
                 recipient_email = os.getenv('RECIPIENT_EMAIL', 'chingkeiwong666@gmail.com')
+                zoho_email = os.getenv('ZOHO_EMAIL')
+                zoho_app_pass = os.getenv('ZOHO_APP_PASS')
                 
-                # 检查SendGrid配置是否完整
+                # 检查配置
                 sendgrid_configured = bool(sendgrid_api_key) and bool(sender_email) and bool(recipient_emails)
                 gmail_configured = bool(gmail_email) and bool(gmail_password)
-                
-                # 优先使用SendGrid
-                if sendgrid_configured:
+                zoho_configured = bool(zoho_email) and bool(zoho_app_pass) and bool(recipient_emails)
+
+                # 优先 Zoho，其次 SendGrid，最后 Gmail
+                if zoho_configured:
+                    success = self.send_email_via_zoho(zoho_email, zoho_app_pass, recipient_emails)
+                    email_service = "Zoho"
+                elif sendgrid_configured:
                     success = self.send_test_email_sendgrid(sendgrid_api_key, recipient_emails.split(',')[0].strip())
                     email_service = "SendGrid"
                 elif gmail_configured:
@@ -121,7 +135,7 @@ class EmailTestHandler(BaseHTTPRequestHandler):
                     email_service = "Gmail SMTP"
                 else:
                     success = False
-                    email_service = None
+                    email_service = "None"
                 
                 if not success:
                     result = {
@@ -163,6 +177,26 @@ class EmailTestHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b'Not Found')
+
+    def send_email_via_zoho(self, sender, app_pass, recipients_csv):
+        try:
+            recipients = [e.strip() for e in recipients_csv.split(',') if e.strip()]
+            if not recipients:
+                raise Exception("缺少收件人")
+            subject = "🧪 VVNews Zoho 邮件测试"
+            body_text = f"Zoho 测试邮件 - 北京时间: {datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')}\n"
+            msg = MIMEMultipart()
+            msg['From'] = f"VVNews Bot <{sender}>"
+            msg['To'] = ", ".join(recipients)
+            msg['Subject'] = subject
+            msg.attach(MIMEText(body_text, 'plain', 'utf-8'))
+            with smtplib.SMTP_SSL('smtp.zoho.com.cn', 465, timeout=15) as server:
+                server.login(sender, app_pass)
+                server.send_message(msg)
+            return True
+        except Exception as e:
+            logging.error(f"Zoho 邮件发送失败: {e}")
+            return False
     
     def send_test_email_sendgrid(self, api_key, recipient_email):
         """使用SendGrid API发送测试邮件"""

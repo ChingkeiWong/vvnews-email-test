@@ -44,7 +44,8 @@ class VVNewsBotAuto:
         self.email_config = {
             'smtp_server': 'smtp.gmail.com',
             'smtp_port': 587,
-            'sender_email': os.getenv('GMAIL_EMAIL', 'chingkeiwong666@gmail.com'),
+            # Render/本地统一：优先 Zoho 作为发件显示，Gmail 仅回退
+            'sender_email': os.getenv('ZOHO_EMAIL', os.getenv('GMAIL_EMAIL', 'chingkeiwong666@gmail.com')),
             'sender_password': os.getenv('GMAIL_PASSWORD', 'scjrjhnfyohdigem'),
             'recipient_emails': os.getenv('RECIPIENT_EMAILS', default_recipients),
             'subject_prefix': '[VVNews] 王敏奕最新新闻'
@@ -1945,14 +1946,12 @@ class VVNewsBotAuto:
             print("没有新新闻，不发送邮件")
             return False
         
-        if not self.email_config['sender_password']:
-            print("邮箱密码未设置，跳过邮件发送")
-            return False
-        
         try:
             msg = MIMEMultipart()
+            # 收件人
+            to_emails = [e.strip() for e in str(self.email_config['recipient_emails']).split(',') if e.strip()]
             msg['From'] = self.email_config['sender_email']
-            msg['To'] = self.email_config['recipient_emails']
+            msg['To'] = ", ".join(to_emails)
             msg['Subject'] = f"{self.email_config['subject_prefix']} - 发现 {len(results)} 条新新闻"
             
             # 构建邮件正文
@@ -2003,16 +2002,36 @@ VVNews 王敏奕新闻机器人 (智能检测版本)
             
             msg.attach(MIMEText(body, 'plain', 'utf-8'))
             
-            # 发送邮件
-            print("正在发送新新闻邮件通知...")
-            server = smtplib.SMTP(self.email_config['smtp_server'], self.email_config['smtp_port'])
-            server.starttls()
-            server.login(self.email_config['sender_email'], self.email_config['sender_password'])
-            server.send_message(msg)
-            server.quit()
+            # 优先 Zoho SMTP
+            zoho_email = os.getenv('ZOHO_EMAIL')
+            zoho_pass = os.getenv('ZOHO_APP_PASS')
+            if zoho_email and zoho_pass:
+                try:
+                    print("📧 使用 Zoho SMTP 发送邮件...")
+                    msg['From'] = zoho_email
+                    with smtplib.SMTP_SSL('smtp.zoho.com.cn', 465, timeout=15) as server:
+                        server.login(zoho_email, zoho_pass)
+                        server.send_message(msg)
+                    print("✅ Zoho 邮件发送成功！")
+                    print(f"📧 邮件已发送到: {', '.join(to_emails)}")
+                    print(f"📊 包含 {len(results)} 条新新闻")
+                    return True
+                except Exception as e:
+                    logging.warning(f"Zoho 发送失败，回退到 Gmail: {e}")
             
-            print(f"✅ 新新闻邮件发送成功！")
-            print(f"📧 邮件已发送到: {self.email_config['recipient_emails']}")
+            # 回退 Gmail SMTP（需要配置 GMAIL_EMAIL/GMAIL_PASSWORD）
+            gmail_email = os.getenv('GMAIL_EMAIL')
+            gmail_pass = os.getenv('GMAIL_PASSWORD')
+            if not gmail_email or not gmail_pass:
+                print("⚠️  未配置 Gmail 回退凭据，跳过发送")
+                return False
+            print("📧 使用 Gmail SMTP 发送邮件...")
+            with smtplib.SMTP(self.email_config['smtp_server'], self.email_config['smtp_port']) as server:
+                server.starttls()
+                server.login(gmail_email, gmail_pass)
+                server.send_message(msg)
+            print("✅ Gmail 邮件发送成功！")
+            print(f"📧 邮件已发送到: {', '.join(to_emails)}")
             print(f"📊 包含 {len(results)} 条新新闻")
             return True
             

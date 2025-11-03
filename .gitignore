@@ -51,3 +51,6 @@ email_config.py
 
 # Archive
 vvnews_archive/
+# Gmail API 凭证文件
+token.json
+credentials.json

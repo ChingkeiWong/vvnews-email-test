@@ -76,6 +76,13 @@ else
     echo "⚠️ 未找到email_config.py，将使用默认邮件配置"
 fi
 
+# 设置 Zoho 邮件环境变量（优先使用 Zoho 作为发件人与收件人）
+echo "📧 配置 Zoho 邮件为优先发件与收件..."
+export ZOHO_EMAIL='chingkeiwong@zohomail.cn'
+export ZOHO_APP_PASS='N7TX5TkC0bDu'
+# 收件人优先：显式指定 Zoho 收件人
+export RECIPIENT_EMAIL='chingkeiwong@zohomail.cn'
+
 echo ""
 echo "🚀 启动VVNews Bot (24小时版本)..."
 echo "⏰ 开始搜索过去24小时的王敏奕相关新闻..."

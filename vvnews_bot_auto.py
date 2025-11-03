@@ -45,7 +45,8 @@ class VVNewsBotAuto:
         self.email_config = {
             'smtp_server': 'smtp.gmail.com',
             'smtp_port': 587,
-            'sender_email': os.getenv('GMAIL_EMAIL', 'chingkeiwong666@gmail.com'),
+            # 优先使用 Zoho 作为发件人（用于显示）；Gmail 仅作为回退
+            'sender_email': os.getenv('ZOHO_EMAIL', os.getenv('GMAIL_EMAIL', 'chingkeiwong666@gmail.com')),
             'sender_password': os.getenv('GMAIL_PASSWORD', 'scjrjhnfyohdigem'),
             'recipient_emails': os.getenv('RECIPIENT_EMAILS', default_recipients),
             'subject_prefix': '[VVNews] 王敏奕最新新闻'
@@ -2021,14 +2022,12 @@ class VVNewsBotAuto:
             print("没有新新闻，不发送邮件")
             return False
         
-        if not self.email_config['sender_password']:
-            print("邮箱密码未设置，跳过邮件发送")
-            return False
-        
         try:
             msg = MIMEMultipart()
+            # 收件人来自环境变量/配置
+            to_emails = [e.strip() for e in str(self.email_config['recipient_emails']).split(',') if e.strip()]
             msg['From'] = self.email_config['sender_email']
-            msg['To'] = self.email_config['recipient_emails']
+            msg['To'] = ", ".join(to_emails)
             msg['Subject'] = f"{self.email_config['subject_prefix']} - 发现 {len(results)} 条新新闻"
             
             # 构建邮件正文
@@ -2079,22 +2078,186 @@ VVNews 王敏奕新闻机器人 (智能检测版本)
             
             msg.attach(MIMEText(body, 'plain', 'utf-8'))
             
-            # 发送邮件
-            print("正在发送新新闻邮件通知...")
-            server = smtplib.SMTP(self.email_config['smtp_server'], self.email_config['smtp_port'])
-            server.starttls()
-            server.login(self.email_config['sender_email'], self.email_config['sender_password'])
-            server.send_message(msg)
-            server.quit()
+            # 优先尝试 Zoho SMTP（如果配置）
+            zoho_email = os.getenv('ZOHO_EMAIL')
+            zoho_pass = os.getenv('ZOHO_APP_PASS')
+            if zoho_email and zoho_pass:
+                try:
+                    print("📧 使用 Zoho SMTP 发送邮件...")
+                    msg['From'] = zoho_email
+                    with smtplib.SMTP_SSL('smtp.zoho.com.cn', 465, timeout=15) as server:
+                        server.login(zoho_email, zoho_pass)
+                        server.send_message(msg)
+                    print("✅ Zoho 邮件发送成功！")
+                    print(f"📧 邮件已发送到: {', '.join(to_emails)}")
+                    print(f"📊 包含 {len(results)} 条新新闻")
+                    return True
+                except Exception as e:
+                    logging.warning(f"Zoho 发送失败，回退到 Gmail: {e}")
             
-            print(f"✅ 新新闻邮件发送成功！")
-            print(f"📧 邮件已发送到: {self.email_config['recipient_emails']}")
+            # 回退到 Gmail SMTP（STARTTLS 587）
+            if not os.getenv('GMAIL_EMAIL') or not os.getenv('GMAIL_PASSWORD'):
+                print("⚠️  未配置Gmail回退凭据，跳过")
+                return False
+            print("📧 使用 Gmail SMTP 发送邮件...")
+            with smtplib.SMTP(self.email_config['smtp_server'], self.email_config['smtp_port']) as server:
+                server.starttls()
+                server.login(os.getenv('GMAIL_EMAIL'), os.getenv('GMAIL_PASSWORD'))
+                server.send_message(msg)
+            print("✅ Gmail 邮件发送成功！")
+            print(f"📧 邮件已发送到: {', '.join(to_emails)}")
             print(f"📊 包含 {len(results)} 条新新闻")
             return True
             
         except Exception as e:
             print(f"❌ 邮件发送失败: {str(e)}")
             return False
+
+    def _extract_am730_publish_time(self, article_url):
+        try:
+            resp = self.session.get(article_url, timeout=8)
+            if resp.status_code != 200:
+                return None, None
+            html = resp.text
+            patterns = [
+                r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
+                r'"datePublished"\s*:\s*"([^"]+)"',
+                r'<meta[^>]+name=["\']pubdate["\'][^>]+content=["\']([^"\']+)["\']',
+            ]
+            from datetime import timezone, timedelta
+            for pat in patterns:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m:
+                    raw = m.group(1).strip()
+                    try:
+                        dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+                    except Exception:
+                        try:
+                            dt = datetime.strptime(raw[:16], '%Y-%m-%d %H:%M')
+                            dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+                        except Exception:
+                            continue
+                    beijing_tz = timezone(timedelta(hours=8))
+                    dt_bj = dt.astimezone(beijing_tz)
+                    return dt.isoformat(), dt_bj.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return None, None
+        return None, None
+
+    def _search_am730_via_google(self, keyword, need=3, seen=None):
+        if seen is None:
+            seen = set()
+        results = []
+        try:
+            q = f"site:am730.com.hk {keyword}"
+            url = "https://www.google.com/search"
+            headers = {'User-Agent': self.session.headers.get('User-Agent', '')}
+            resp = self.session.get(url, params={'q': q, 'hl': 'zh-TW'}, headers=headers, timeout=8)
+            if resp.status_code != 200:
+                return results
+            soup = BeautifulSoup(resp.text, 'lxml')
+            for a in soup.select('a'):
+                href = a.get('href') or ''
+                text = (a.get_text() or '').strip()
+                if not href or not text:
+                    continue
+                if href.startswith('/url?q='):
+                    try:
+                        real = href.split('/url?q=')[1].split('&')[0]
+                    except Exception:
+                        continue
+                elif href.startswith('http'):
+                    real = href
+                else:
+                    continue
+                if 'am730.com.hk' not in real:
+                    continue
+                if keyword not in text and keyword not in real:
+                    continue
+                if real in seen:
+                    continue
+                pub_iso, pub_readable = self._extract_am730_publish_time(real)
+                if not pub_iso:
+                    continue
+                if not self.is_within_time_range({'publish_time': pub_iso}):
+                    continue
+                seen.add(real)
+                results.append({
+                    'title': text[:120],
+                    'url': real,
+                    'source': 'am730',
+                    'keyword': keyword,
+                    'publish_time': pub_iso,
+                    'publish_time_readable': pub_readable
+                })
+                if len(results) >= need:
+                    break
+            return results
+        except Exception:
+            return results
+
+    def search_am730(self, keyword):
+        results = []
+        try:
+            logging.info(f"搜索 am730: {keyword}")
+            candidate_pages = [
+                f"https://www.am730.com.hk/search?search={keyword}",
+                f"https://www.am730.com.hk/search/{keyword}",
+                "https://www.am730.com.hk/%E5%A8%9B%E6%A8%82",
+            ]
+            seen = set()
+            max_items = 6
+            for page in candidate_pages:
+                try:
+                    resp = self.session.get(page, timeout=12)
+                    if resp.status_code != 200:
+                        continue
+                    soup = BeautifulSoup(resp.text, 'lxml')
+                    for a in soup.find_all('a'):
+                        title = (a.get_text() or '').strip()
+                        href = a.get('href') or ''
+                        if not title or not href:
+                            continue
+                        if keyword not in title:
+                            continue
+                        if href.startswith('/'):
+                            url = f"https://www.am730.com.hk{href}"
+                        elif href.startswith('http'):
+                            url = href
+                        else:
+                            continue
+                        if 'am730.com.hk' not in url:
+                            continue
+                        if url in seen:
+                            continue
+                        pub_iso, pub_readable = self._extract_am730_publish_time(url)
+                        if not pub_iso or not self.is_within_time_range({'publish_time': pub_iso}):
+                            continue
+                        seen.add(url)
+                        results.append({
+                            'title': title,
+                            'url': url,
+                            'source': 'am730',
+                            'keyword': keyword,
+                            'publish_time': pub_iso,
+                            'publish_time_readable': pub_readable
+                        })
+                        if len(results) >= max_items:
+                            break
+                except Exception:
+                    continue
+                if len(results) >= max_items:
+                    break
+            if len(results) < 2:
+                try:
+                    results.extend(self._search_am730_via_google(keyword, need=max_items-len(results), seen=seen))
+                except Exception:
+                    pass
+            logging.info(f"am730 搜索完成，找到 {len(results)} 条结果")
+            return results
+        except Exception as e:
+            logging.error(f"搜索 am730 时出错: {e}")
+            return results
     
     def save_results(self, results):
         """保存结果到JSON文件"""

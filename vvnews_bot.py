@@ -12,11 +12,21 @@ import re
 import json
 import os
 import smtplib
+import base64
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import logging
+
+# Gmail API 支持（可选）
+try:
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    GMAIL_API_AVAILABLE = True
+except ImportError:
+    GMAIL_API_AVAILABLE = False
+    logging.warning("Gmail API 库未安装，将仅使用 SMTP 发送邮件")
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,10 +45,15 @@ class VVNewsBot:
         self.email_config = {
             'smtp_server': 'smtp.gmail.com',
             'smtp_port': 587,
-            'sender_email': 'chingkeiwong666@gmail.com',
+            # 发件人优先级：ZOHO_EMAIL（用于Zoho/统一显示）> 默认Gmail（用于Gmail回退）
+            'sender_email': os.getenv('ZOHO_EMAIL') or 'chingkeiwong666@gmail.com',
             'sender_password': 'scjrjhnfyohdigem',
-            'recipient_email': 'chingkeiwong666@gmail.com',
-            'subject_prefix': f'[VVNews] 王敏奕最新新闻 (过去{search_hours}小时)'
+            # 收件人优先级：RECIPIENT_EMAIL 环境变量 > ZOHO_EMAIL > 默认 Gmail
+            'recipient_email': os.getenv('RECIPIENT_EMAIL') or os.getenv('ZOHO_EMAIL') or 'chingkeiwong666@gmail.com',
+            'subject_prefix': f'[VVNews] 王敏奕最新新闻 (过去{search_hours}小时)',
+            # Gmail API 配置（可选）
+            'gmail_api_token_file': os.getenv('GMAIL_API_TOKEN_FILE', 'token.json'),
+            'gmail_api_enabled': os.getenv('GMAIL_API_ENABLED', 'false').lower() == 'true'
         }
     
     def search_hk01(self, keyword):
@@ -164,10 +179,173 @@ class VVNewsBot:
             
             logging.info(f"香港01 搜索完成，找到 {len(results)} 条结果")
             return results
-            
         except Exception as e:
             logging.error(f"搜索香港01时出错: {e}")
             return results
+
+    def search_am730(self, keyword):
+        """搜索 am730 娱乐新闻，优先站内页面，回退到简单匹配
+        逻辑：尝试站内搜索/娱乐频道页，收集包含关键词的标题链接
+        """
+        results = []
+        try:
+            logging.info(f"搜索 am730: {keyword}")
+            candidate_pages = [
+                f"https://www.am730.com.hk/search?search={keyword}",  # 官方搜索页（参数版）
+                f"https://www.am730.com.hk/search/{keyword}",         # 备用路径版
+                "https://www.am730.com.hk/%E5%A8%9B%E6%A8%82",
+                "https://www.am730.com.hk/",
+            ]
+            seen = set()
+            max_items = 6
+            for page in candidate_pages:
+                try:
+                    resp = self.session.get(page, timeout=12)
+                    if resp.status_code != 200:
+                        continue
+                    soup = BeautifulSoup(resp.text, 'lxml')
+                    for a in soup.find_all('a'):
+                        title = (a.get_text() or '').strip()
+                        href = a.get('href') or ''
+                        if not title or not href:
+                            continue
+                        if keyword not in title:
+                            continue
+                        if href.startswith('/'):
+                            url = f"https://www.am730.com.hk{href}"
+                        elif href.startswith('http'):
+                            url = href
+                        else:
+                            continue
+                        if 'am730.com.hk' not in url:
+                            continue
+                        if url in seen:
+                            continue
+                        # 进入文章页提取发布时间并过滤24小时内
+                        pub_iso, pub_readable = self._extract_am730_publish_time(url)
+                        if not pub_iso:
+                            # 若文章页无法解析时间，则跳过，避免误报
+                            continue
+                        # 构造临时对象进行时间窗口校验
+                        temp_item = {'publish_time': pub_iso}
+                        if not self.is_within_time_range(temp_item):
+                            continue
+                        seen.add(url)
+                        results.append({
+                            'title': title,
+                            'url': url,
+                            'source': 'am730',
+                            'keyword': keyword,
+                            'publish_time': pub_iso,
+                            'publish_time_readable': pub_readable
+                        })
+                        if len(results) >= max_items:
+                            break
+                except Exception:
+                    continue
+                if len(results) >= max_items:
+                    break
+            # 回退：使用 Google site: 搜索 am730（如站内抓取不足）
+            if len(results) < 2:
+                try:
+                    fallback = self._search_am730_via_google(keyword, need=max_items - len(results), seen=seen)
+                    results.extend(fallback)
+                except Exception as _:
+                    pass
+
+            logging.info(f"am730 搜索完成，找到 {len(results)} 条结果")
+            return results
+        except Exception as e:
+            logging.error(f"搜索 am730 时出错: {e}")
+            return results
+
+    def _search_am730_via_google(self, keyword, need=3, seen=None):
+        """回退：通过 Google site:am730.com.hk 搜索关键字页面"""
+        if seen is None:
+            seen = set()
+        results = []
+        try:
+            q = f"site:am730.com.hk {keyword}"
+            url = "https://www.google.com/search"
+            headers = {
+                'User-Agent': self.session.headers.get('User-Agent', '')
+            }
+            resp = self.session.get(url, params={'q': q, 'hl': 'zh-TW'}, headers=headers, timeout=8)
+            if resp.status_code != 200:
+                return results
+            soup = BeautifulSoup(resp.text, 'lxml')
+            for a in soup.select('a'):
+                href = a.get('href') or ''
+                text = (a.get_text() or '').strip()
+                if not href or not text:
+                    continue
+                if href.startswith('/url?q='):
+                    try:
+                        real = href.split('/url?q=')[1].split('&')[0]
+                    except Exception:
+                        continue
+                elif href.startswith('http'):
+                    real = href
+                else:
+                    continue
+                if 'am730.com.hk' not in real:
+                    continue
+                if keyword not in text and keyword not in real:
+                    continue
+                if real in seen:
+                    continue
+                pub_iso, pub_readable = self._extract_am730_publish_time(real)
+                if not pub_iso:
+                    continue
+                if not self.is_within_time_range({'publish_time': pub_iso}):
+                    continue
+                seen.add(real)
+                results.append({
+                    'title': text[:120],
+                    'url': real,
+                    'source': 'am730',
+                    'keyword': keyword,
+                    'publish_time': pub_iso,
+                    'publish_time_readable': pub_readable
+                })
+                if len(results) >= need:
+                    break
+            return results
+        except Exception:
+            return results
+
+    def _extract_am730_publish_time(self, article_url):
+        """从 am730 文章页提取发布时间 (iso, readable)"""
+        try:
+            resp = self.session.get(article_url, timeout=8)
+            if resp.status_code != 200:
+                return None, None
+            html = resp.text
+            patterns = [
+                r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
+                r'"datePublished"\s*:\s*"([^"]+)"',
+                r'<meta[^>]+name=["\']pubdate["\'][^>]+content=["\']([^"\']+)["\']',
+            ]
+            from datetime import timezone, timedelta
+            for pat in patterns:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m:
+                    raw = m.group(1).strip()
+                    try:
+                        dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+                    except Exception:
+                        # 尝试常见格式：YYYY-MM-DD HH:MM
+                        try:
+                            dt = datetime.strptime(raw[:16], '%Y-%m-%d %H:%M')
+                            dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+                        except Exception:
+                            continue
+                    beijing_tz = timezone(timedelta(hours=8))
+                    dt_bj = dt.astimezone(beijing_tz)
+                    return dt.isoformat(), dt_bj.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return None, None
+        return None, None
     
     def search_google_news(self, keyword):
         """搜索Google News - 带时间过滤"""
@@ -1626,6 +1804,7 @@ class VVNewsBot:
         all_results = []
         
         # 搜索所有9个新闻来源
+        # 新增 am730 为第10个来源
         all_results.extend(self.search_google_news(keyword))
         all_results.extend(self.search_hk01(keyword))
         all_results.extend(self.search_oncc(keyword))
@@ -1635,6 +1814,7 @@ class VVNewsBot:
         all_results.extend(self.search_wenweipo(keyword))
         all_results.extend(self.search_tvb(keyword))
         all_results.extend(self.search_youtube(keyword))
+        all_results.extend(self.search_am730(keyword))
         
         return all_results
     
@@ -1700,6 +1880,63 @@ class VVNewsBot:
         
         return unique_results
     
+    def send_email_via_zoho(self, to, subject, body):
+        """使用 Zoho SMTP 发送邮件"""
+        zoho_email = os.getenv('ZOHO_EMAIL')
+        zoho_app_pass = os.getenv('ZOHO_APP_PASS')
+        
+        if not zoho_email or not zoho_app_pass:
+            raise Exception("Zoho 环境变量未设置：需要 ZOHO_EMAIL 和 ZOHO_APP_PASS")
+        
+        try:
+            msg = MIMEMultipart()
+            msg["From"] = zoho_email  # Zoho 要求 From 地址与登录邮箱一致
+            msg["To"] = to
+            msg["Subject"] = subject
+            msg.attach(MIMEText(body, "plain", "utf-8"))
+            
+            # 优先使用中国区服务器（已验证可用）
+            smtp_host = "smtp.zoho.com.cn"
+            smtp_port = 465
+            
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15)
+            server.login(zoho_email, zoho_app_pass)
+            server.send_message(msg)
+            server.quit()
+            
+            logging.info(f"Zoho 邮件发送成功: {smtp_host}:{smtp_port}")
+            return True
+        except Exception as e:
+            logging.error(f"Zoho 邮件发送失败: {e}")
+            raise
+    
+    def send_email_via_gmail_api(self, to, subject, body):
+        """使用 Gmail API 发送邮件"""
+        if not GMAIL_API_AVAILABLE:
+            raise Exception("Gmail API 库未安装，请运行: pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client")
+        
+        token_file = self.email_config.get('gmail_api_token_file', 'token.json')
+        if not os.path.exists(token_file):
+            raise FileNotFoundError(f"Gmail API token 文件不存在: {token_file}\n请先运行认证流程获取 token.json")
+        
+        try:
+            creds = Credentials.from_authorized_user_file(token_file, ['https://www.googleapis.com/auth/gmail.send'])
+            service = build('gmail', 'v1', credentials=creds)
+            
+            message = MIMEText(body, 'plain', 'utf-8')
+            message['to'] = to
+            message['subject'] = subject
+            
+            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            message_obj = {'raw': raw}
+            
+            result = service.users().messages().send(userId="me", body=message_obj).execute()
+            logging.info(f"Gmail API 邮件发送成功，Message ID: {result.get('id')}")
+            return True
+        except Exception as e:
+            logging.error(f"Gmail API 发送失败: {e}")
+            raise
+    
     def send_email(self, results):
         """发送邮件通知"""
         if not results:
@@ -1751,19 +1988,128 @@ VVNews 王敏奕新闻机器人
             
             # 发送邮件
             print("正在发送邮件通知...")
-            # 使用SSL直连465端口并设置超时时间
-            server = smtplib.SMTP_SSL(self.email_config['smtp_server'], 465, timeout=20)
-            server.login(self.email_config['sender_email'], self.email_config['sender_password'])
-            server.send_message(msg)
-            server.quit()
             
-            print(f"✅ 邮件发送成功！")
-            print(f"📧 邮件已发送到: {self.email_config['recipient_email']}")
-            print(f"📊 包含 {len(results)} 条新闻")
-            return True
+            # 邮件发送优先级：Zoho > Gmail API > Gmail SMTP
+            
+            # 优先尝试 Zoho SMTP（如果配置）
+            zoho_email = os.getenv('ZOHO_EMAIL')
+            zoho_app_pass = os.getenv('ZOHO_APP_PASS')
+            if zoho_email and zoho_app_pass:
+                try:
+                    print("📧 尝试使用 Zoho SMTP 发送邮件...")
+                    self.send_email_via_zoho(
+                        to=self.email_config['recipient_email'],
+                        subject=msg['Subject'],
+                        body=body
+                    )
+                    print(f"✅ 邮件发送成功！(使用 Zoho SMTP)")
+                    print(f"📧 邮件已发送到: {self.email_config['recipient_email']}")
+                    print(f"📊 包含 {len(results)} 条新闻")
+                    return True
+                except Exception as zoho_error:
+                    logging.warning(f"Zoho 发送失败，回退到其他方式: {zoho_error}")
+                    print("⚠️  Zoho 发送失败，尝试使用其他邮件服务...")
+            
+            # 尝试 Gmail API（如果启用）
+            if self.email_config.get('gmail_api_enabled', False) and GMAIL_API_AVAILABLE:
+                try:
+                    print("📧 尝试使用 Gmail API 发送邮件...")
+                    self.send_email_via_gmail_api(
+                        to=self.email_config['recipient_email'],
+                        subject=msg['Subject'],
+                        body=body
+                    )
+                    print(f"✅ 邮件发送成功！(使用 Gmail API)")
+                    print(f"📧 邮件已发送到: {self.email_config['recipient_email']}")
+                    print(f"📊 包含 {len(results)} 条新闻")
+                    return True
+                except Exception as api_error:
+                    logging.warning(f"Gmail API 发送失败，回退到 SMTP: {api_error}")
+                    print("⚠️  Gmail API 发送失败，尝试使用 Gmail SMTP...")
+            
+            # 尝试多种连接方式：先试465 SSL，失败则试587 STARTTLS
+            smtp_port = self.email_config.get('smtp_port', 587)
+            smtp_server = self.email_config['smtp_server']
+            sender_email = self.email_config['sender_email']
+            sender_password = self.email_config['sender_password']
+            
+            # 增加重试机制和更长的超时时间
+            max_retries = 3
+            timeout_seconds = 30  # 增加到30秒
+            
+            # 方法1: 尝试SSL直连465端口（带重试）
+            last_error_465 = None
+            for attempt in range(max_retries):
+                try:
+                    logging.info(f"尝试连接Gmail SMTP (SSL 465端口) - 第 {attempt + 1}/{max_retries} 次")
+                    server = smtplib.SMTP_SSL(smtp_server, 465, timeout=timeout_seconds)
+                    server.login(sender_email, sender_password)
+                    server.send_message(msg)
+                    server.quit()
+                    print(f"✅ 邮件发送成功！(使用SSL 465端口, 第 {attempt + 1} 次尝试)")
+                    print(f"📧 邮件已发送到: {self.email_config['recipient_email']}")
+                    print(f"📊 包含 {len(results)} 条新闻")
+                    return True
+                except Exception as e1:
+                    last_error_465 = e1
+                    logging.warning(f"SSL 465端口连接失败 (第 {attempt + 1} 次): {e1}")
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(2)  # 重试前等待2秒
+            
+            # 方法2: 尝试STARTTLS 587端口（带重试）
+            last_error_587 = None
+            for attempt in range(max_retries):
+                try:
+                    logging.info(f"尝试连接Gmail SMTP (STARTTLS 587端口) - 第 {attempt + 1}/{max_retries} 次")
+                    server = smtplib.SMTP(smtp_server, 587, timeout=timeout_seconds)
+                    server.starttls()
+                    server.login(sender_email, sender_password)
+                    server.send_message(msg)
+                    server.quit()
+                    print(f"✅ 邮件发送成功！(使用STARTTLS 587端口, 第 {attempt + 1} 次尝试)")
+                    print(f"📧 邮件已发送到: {self.email_config['recipient_email']}")
+                    print(f"📊 包含 {len(results)} 条新闻")
+                    return True
+                except Exception as e2:
+                    last_error_587 = e2
+                    logging.warning(f"STARTTLS 587端口连接失败 (第 {attempt + 1} 次): {e2}")
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(2)  # 重试前等待2秒
+            
+            # 所有方式都失败
+            error_msg = f"所有邮件发送方式都失败（已重试 {max_retries} 次）:\n"
+            error_msg += f"  - SSL 465端口: {str(last_error_465)}\n"
+            error_msg += f"  - STARTTLS 587端口: {str(last_error_587)}\n"
+            error_msg += "\n💡 建议：\n"
+            error_msg += "  1. 检查网络连接和防火墙设置\n"
+            error_msg += "  2. 确认是否可以访问 smtp.gmail.com\n"
+            error_msg += "  3. 如有VPN，尝试启用VPN后重试\n"
+            error_msg += "  4. 检查Gmail应用密码是否有效"
+            raise Exception(error_msg)
             
         except Exception as e:
             print(f"❌ 邮件发送失败: {str(e)}")
+            # 如果网络连接失败，保存邮件内容到文件以便后续手动发送
+            try:
+                # os 已在文件顶部导入，直接使用
+                os.makedirs('./results', exist_ok=True)
+                email_backup_file = f'./results/email_failed_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+                with open(email_backup_file, 'w', encoding='utf-8') as f:
+                    f.write(f"邮件主题: {msg.get('Subject', '')}\n")
+                    f.write(f"发送时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"收件人: {self.email_config['recipient_email']}\n")
+                    f.write("\n" + "="*60 + "\n")
+                    f.write("邮件内容:\n")
+                    f.write("="*60 + "\n\n")
+                    for part in msg.walk():
+                        if part.get_content_type() == 'text/plain':
+                            f.write(part.get_payload(decode=True).decode('utf-8'))
+                print(f"📁 邮件内容已备份到: {email_backup_file}")
+                print("💡 您可以稍后在网络恢复后手动发送此邮件")
+            except Exception as backup_error:
+                logging.warning(f"保存邮件备份失败: {backup_error}")
             return False
     
     def save_results(self, results, filename=None):
@@ -1792,7 +2138,7 @@ VVNews 王敏奕新闻机器人
         print("=" * 60)
         print(f"开始搜索关于 {keyword} 的新闻...")
         print("📰 新闻源: Google News, 香港01, 東網on.cc, 星島娛樂")
-        print("          明報, 明周, 香港文匯報, TVB, YouTube")
+        print("          明報, 明周, 香港文匯報, TVB, YouTube, am730")
         print("=" * 60)
         
         # 搜索所有来源

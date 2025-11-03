@@ -2,3 +2,9 @@ requests>=2.25.1
 beautifulsoup4>=4.9.3
 lxml>=4.6.3
 feedparser>=6.0.10
+
+# Gmail API 支持（可选，仅在启用 Gmail API 时安装）
+google-auth>=2.0.0
+google-auth-oauthlib>=0.5.0
+google-auth-httplib2>=0.1.0
+google-api-python-client>=2.0.0

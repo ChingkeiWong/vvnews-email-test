@@ -1,0 +1,18 @@
+Zoho 邮件配置信息
+==================
+
+✅ 测试成功！配置信息如下：
+
+邮箱地址: chingkeiwong@zohomail.cn
+应用密码: N7TX5TkC0bDu
+收件人: chingkeiwong@zohomail.cn
+SMTP服务器: smtp.zoho.com.cn:465 (SSL)
+
+环境变量设置：
+export ZOHO_EMAIL='chingkeiwong@zohomail.cn'
+export ZOHO_APP_PASS='N7TX5TkC0bDu'
+export RECIPIENT_EMAILS='chingkeiwong@zohomail.cn'
+
+测试时间: 2025-11-03
+测试状态: ✅ 成功
+
